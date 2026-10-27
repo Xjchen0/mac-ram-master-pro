@@ -2,11 +2,15 @@
     "extends": "./tsconfig.json",
     "compilerOptions": {
         "module": "CommonJS",
-        "outDir": "dist/main",
+        "rootDir": "src",
+        "outDir": "dist",
         "noEmit": false
     },
     "include": [
-        "src/main/main.ts",
-        "src/main/preload.ts"
-    ]
+        "src/main/**/*.ts",
+        "src/shared/**/*.ts"
+    ],
+    // 必须显式清空：基础 tsconfig.json 的 exclude 会被继承下来（extends 只覆盖 include，不覆盖 exclude），
+    // 否则 src/main 会被过滤掉，tsc 仍然退出 0 但一个主进程文件都不产出。
+    "exclude": []
 }

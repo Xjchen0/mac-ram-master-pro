@@ -25,8 +25,23 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
       - name: Build
         run: npm run build
+
+      # 打包前的冒烟检查：主进程入口与渲染层 HTML 必须都真实落盘。
+      # 之前 loadFile 指向的路径与 Vite 实际产物对不上，构建照样成功、
+      # 发布出去的却是白屏窗口 —— 光看构建退出码永远发现不了。
+      - name: Verify Build Artifacts
+        run: |
+          test -f dist/main/main.js
+          test -f dist/main/preload.js
+          test -f dist/renderer/index.html
 
       - name: Package and Publish Release
         run: npm run dist -- --publish always
