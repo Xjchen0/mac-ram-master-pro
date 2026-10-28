@@ -1,57 +1,39 @@
 {
   "name": "mac-ram-cleaner-pro",
   "version": "1.0.2",
-  "description": "Professional macOS RAM Cleaner with Apple-grade UI",
+  "description": "macOS 内存监控与清理的终端工具（TUI）",
   "repository": {
     "type": "git",
     "url": "https://github.com/CHANGGELY/mac-ram-master-pro.git"
   },
-  "main": "dist/main/main.js",
+  "type": "module",
+  "main": "./dist/cli.js",
+  "bin": {
+    "ram-master": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -p tsconfig.main.json && vite build",
-    "electron:dev": "VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder",
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.json && tsc -p tsconfig.test.json --noEmit"
-  },
-  "build": {
-    "appId": "com.antigravity.rammaster",
-    "productName": "RAM Master",
-    "mac": {
-      "category": "public.app-category.utilities",
-      "icon": "public/icon.png"
-    },
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "node_modules/**/*",
-      "package.json"
-    ]
-  },
-  "devDependencies": {
-    "@testing-library/dom": "^9.3.4",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^14.3.1",
-    "@types/node": "^20.0.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "@vitejs/plugin-react": "^4.2.0",
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.0",
-    "jsdom": "^24.1.3",
-    "typescript": "^5.3.0",
-    "vite": "^5.0.0",
-    "vitest": "^1.6.1"
+    "typecheck": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "framer-motion": "^11.0.0",
-    "lucide-react": "^0.300.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "ink": "^8.0.0",
+    "react": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.3.0",
+    "ink-testing-library": "^4.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
   }
 }

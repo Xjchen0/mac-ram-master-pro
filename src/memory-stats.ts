@@ -1,7 +1,7 @@
 /**
  * [Mentor Note] 内存解析层
  *
- * 本模块只做「字符串 → 数字」的纯计算，不 import electron / child_process，
+ * 本模块只做「字符串 → 数字」的纯计算，不 import child_process，
  * 因此可以在任意操作系统上被单元测试直接覆盖（CI 用 ubuntu runner 即可）。
  *
  * ⚠️ 页大小（Page Size）必须由 vm_stat 自己声明的头部解析，绝不能硬编码：
@@ -15,7 +15,7 @@
  * 因此两者可能相差几个百分点，这是口径差异而非 bug。
  */
 
-import type { 内存统计结果 } from '../shared/ipc-contracts';
+import type { 内存统计结果 } from './类型.js';
 
 /** 页大小兜底值：Apple Silicon 全部为 16384（vm_stat 头部缺失时的保守回退） */
 export const 默认页大小 = 16384;

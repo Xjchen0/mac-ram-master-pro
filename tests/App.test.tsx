@@ -1,67 +1,101 @@
-import React from 'react';
-import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
-import App from '../src/renderer/App';
-import type { 内存统计结果, 清理结果 } from '../src/shared/ipc-contracts';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, type ReactElement } from 'react';
+import { render } from 'ink-testing-library';
+import App, { 轮询间隔毫秒 } from '../src/App.js';
+import { 采集内存统计, 执行清理 } from '../src/内存.js';
+import type { 内存统计结果, 清理结果 } from '../src/类型.js';
+
+vi.mock('../src/内存.js', () => ({
+    采集内存统计: vi.fn(),
+    执行清理: vi.fn(),
+}));
+
+const 采样 = vi.mocked(采集内存统计);
+const 清理 = vi.mocked(执行清理);
 
 const 采样结果: 内存统计结果 = {
-    已用字节: 10_284_089_344, // 9.58 GB
-    可释放字节: 5_862_031_360, // 5.46 GB
-    总字节: 17_179_869_184,
-    已用百分比: 59.9
+    已用字节: 10 * 1024 ** 3,
+    可释放字节: 5 * 1024 ** 3,
+    总字节: 16 * 1024 ** 3,
+    已用百分比: 62.5,
 };
 
-const 轮询间隔 = 2000;
-const 最短清理动效 = 600;
-const 横幅停留 = 5000;
+const 清理成功: 清理结果 = {
+    成功: true,
+    耗时毫秒: 143,
+    释放字节: 1024 ** 3,
+    退出码: 0,
+};
 
-let 获取内存数据: Mock<[], Promise<内存统计结果 | null>>;
-let 执行大扫除: Mock<[], Promise<清理结果>>;
-let 有焦点: boolean;
+const 清理失败: 清理结果 = {
+    成功: false,
+    耗时毫秒: 21,
+    退出码: 1,
+    错误信息: 'Unable to purge disk buffers: Operation not permitted',
+};
 
-/** 推进假定时器，同时冲刷 promise 微任务 */
-const 推进 = async (毫秒: number) => {
-    await act(async () => {
-        await vi.advanceTimersByTimeAsync(毫秒);
+/** render 放进 act 里，否则 Ink 内部的挂载副作用会打出「not wrapped in act」告警 */
+function 挂载(节点: ReactElement) {
+    let 实例!: ReturnType<typeof render>;
+    act(() => {
+        实例 = render(节点);
     });
-};
+    补上写入回调(实例.stdout);
 
-const 设置可见性 = async (值: 'visible' | 'hidden') => {
+    // 卸载同样要包在 act 里：Ink 的 unmount 会触发 React 清理与一次收尾渲染
+    const 原卸载 = 实例.unmount;
+    实例.unmount = () => {
+        act(() => {
+            原卸载();
+        });
+    };
+    return 实例;
+}
+
+/**
+ * ink-testing-library 的假 stdout.write 只收集帧、从不回调，
+ * 而 Ink 的 waitUntilRenderFlush() 恰恰是靠 write('', 回调) 判断「这一帧已经写出去了」。
+ * 缺了它，非交互模式会永远卡在冲刷那一步 —— 这是测试替身的缺口，不是产品行为
+ * （真实 stdout 会正常回调，命令行实跑已验证）。
+ */
+function 补上写入回调(stdout: { write: (帧: string) => void }): void {
+    const 原写入 = stdout.write;
+    stdout.write = ((帧: string, 回调?: () => void) => {
+        原写入(帧);
+        回调?.();
+    }) as (帧: string) => void;
+}
+
+/** 放行一个悬着的 mock promise，并把随之而来的 setState 收进 act */
+async function 放行<T>(解决: ((值: T) => void) | undefined, 值: T): Promise<void> {
     await act(async () => {
-        Object.defineProperty(document, 'visibilityState', { value: 值, configurable: true });
-        document.dispatchEvent(new Event('visibilitychange'));
+        解决?.(值);
     });
-};
+}
 
-const 派发窗口事件 = async (名称: 'focus' | 'blur') => {
+/** 推进假定时器并把 React 的更新与副作用一起冲刷掉 */
+async function 推进(毫秒: number): Promise<void> {
     await act(async () => {
-        window.dispatchEvent(new Event(名称));
+        vi.advanceTimersByTime(毫秒);
     });
-};
+}
 
-/** 渲染并冲刷首次采样，让界面离开加载屏 */
-const 渲染并就绪 = async () => {
-    const 结果 = render(<App />);
-    await 推进(0);
-    return 结果;
-};
+/** 只冲刷微任务（等 await 落地），不推进时间 */
+async function 冲刷(): Promise<void> {
+    await act(async () => {});
+}
+
+/** 敲一个键：Ink 同步解析输入并 setState，必须收进 act 才不会告警 */
+async function 按键(stdin: { write: (数据: string) => void }, 键: string): Promise<void> {
+    await act(async () => {
+        stdin.write(键);
+    });
+}
 
 beforeEach(() => {
-    获取内存数据 = vi.fn<[], Promise<内存统计结果 | null>>().mockResolvedValue(采样结果);
-    执行大扫除 = vi.fn<[], Promise<清理结果>>().mockResolvedValue({
-        成功: true,
-        耗时毫秒: 143,
-        释放字节: 1_073_741_824,
-        退出码: 0
-    });
-    window.electronAPI = { 获取内存数据, 执行大扫除 };
-
-    // jsdom 的 hasFocus / visibilityState 行为随版本而异，显式钉住以保证确定性
-    有焦点 = true;
-    vi.spyOn(document, 'hasFocus').mockImplementation(() => 有焦点);
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
-
     vi.useFakeTimers();
+    采样.mockReset().mockResolvedValue(采样结果);
+    清理.mockReset().mockResolvedValue(清理成功);
 });
 
 afterEach(() => {
@@ -69,269 +103,320 @@ afterEach(() => {
     vi.restoreAllMocks();
 });
 
-describe('首屏与数据渲染', () => {
-    it('首次采样返回前显示加载屏', async () => {
-        render(<App />);
-        expect(screen.getByText('正在监测系统状态...')).toBeInTheDocument();
-        // 消费掉挂起的 setState，否则它会在用例结束后触发 act 警告
-        await 推进(0);
+describe('首屏与采样', () => {
+    it('采样返回前显示加载文案', () => {
+        采样.mockReturnValue(new Promise(() => {}));
+        const { lastFrame, unmount } = 挂载(<App />);
+
+        expect(lastFrame()).toContain('正在读取内存状态');
+        unmount();
     });
 
-    it('挂载后立即取一次数，之后每 2 秒一次', async () => {
-        render(<App />);
-        await 推进(0);
-        expect(获取内存数据).toHaveBeenCalledTimes(1);
+    it('采样成功后显示占用、已用、可释放与总计', async () => {
+        const { lastFrame, unmount } = 挂载(<App />);
+        await 冲刷();
 
-        await 推进(轮询间隔);
-        expect(获取内存数据).toHaveBeenCalledTimes(2);
-
-        await 推进(轮询间隔);
-        expect(获取内存数据).toHaveBeenCalledTimes(3);
+        const 帧 = lastFrame() ?? '';
+        expect(帧).toContain('62.5%');
+        expect(帧).toContain('10.00 GB');
+        expect(帧).toContain('5.00 GB');
+        expect(帧).toContain('16.00 GB');
+        unmount();
     });
 
-    it('把契约里的字节数与百分比渲染成界面文本', async () => {
-        await 渲染并就绪();
+    it('挂载时立刻采一次，之后按轮询间隔继续', async () => {
+        const { unmount } = 挂载(<App />);
+        await 冲刷();
+        expect(采样).toHaveBeenCalledTimes(1);
 
-        expect(screen.getByText('60')).toBeInTheDocument(); // Math.round(59.9)
-        expect(screen.getByText('9.58')).toBeInTheDocument(); // Occupied GB
-        expect(screen.getByText('5.46')).toBeInTheDocument(); // Purgeable GB
-        expect(screen.getByText('RAM MASTER')).toBeInTheDocument();
+        await 推进(轮询间隔毫秒);
+        expect(采样).toHaveBeenCalledTimes(2);
+
+        await 推进(轮询间隔毫秒 * 2);
+        expect(采样).toHaveBeenCalledTimes(4);
+        unmount();
     });
 
-    it('采样返回 null 时保留上一次有效状态，不回退到加载屏', async () => {
-        await 渲染并就绪();
-        获取内存数据.mockResolvedValue(null);
+    it('单次失败不改口报错，连续三次才提示无法读取', async () => {
+        采样.mockResolvedValue(null);
+        const { lastFrame, unmount } = 挂载(<App />);
 
-        await 推进(轮询间隔);
+        // 挂载一次 + 一次轮询 = 两次失败，还没到阈值
+        await 推进(轮询间隔毫秒);
+        expect(采样).toHaveBeenCalledTimes(2);
+        expect(lastFrame()).not.toContain('无法读取内存数据');
 
-        expect(screen.getByText('60')).toBeInTheDocument();
-        expect(screen.queryByText('正在监测系统状态...')).not.toBeInTheDocument();
+        await 推进(轮询间隔毫秒);
+        expect(采样).toHaveBeenCalledTimes(3);
+        expect(lastFrame()).toContain('无法读取内存数据');
+        expect(lastFrame()).toContain('已连续 3 次采样失败');
+        unmount();
+    });
+
+    it('一次成功就把连续失败计数清零', async () => {
+        采样.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValue(采样结果);
+        const { lastFrame, unmount } = 挂载(<App />);
+
+        // 第 1、2 次失败，第 3 次成功 → 计数归零
+        await 推进(轮询间隔毫秒 * 2);
+        expect(lastFrame()).not.toContain('无法读取内存数据');
+
+        // 再失败两次仍然不该报错，因为计数是从成功那次重新数的
+        采样.mockResolvedValue(null);
+        await 推进(轮询间隔毫秒 * 2);
+        expect(采样).toHaveBeenCalledTimes(5);
+        expect(lastFrame()).not.toContain('无法读取内存数据');
+        unmount();
     });
 });
 
-describe('轮询的可见性门控', () => {
-    it('窗口隐藏后停止轮询，恢复可见后立即继续', async () => {
-        await 渲染并就绪();
-        const 隐藏前次数 = 获取内存数据.mock.calls.length;
+describe('暂停', () => {
+    it('按 p 停止轮询，再按一次恢复', async () => {
+        const { lastFrame, stdin, unmount } = 挂载(<App />);
+        await 冲刷();
+        expect(采样).toHaveBeenCalledTimes(1);
 
-        await 设置可见性('hidden');
-        await 推进(轮询间隔 * 5);
-        expect(获取内存数据).toHaveBeenCalledTimes(隐藏前次数);
+        await 按键(stdin, 'p');
+        expect(lastFrame()).toContain('已暂停');
 
-        await 设置可见性('visible');
-        expect(获取内存数据).toHaveBeenCalledTimes(隐藏前次数 + 1);
+        await 推进(轮询间隔毫秒 * 3);
+        expect(采样).toHaveBeenCalledTimes(1);
+
+        await 按键(stdin, 'p');
+        expect(lastFrame()).not.toContain('已暂停');
+
+        // 恢复时立刻补采一次，不让人对着两秒前的旧数据看；之后才进入正常轮询
+        expect(采样).toHaveBeenCalledTimes(2);
+        await 推进(轮询间隔毫秒);
+        expect(采样).toHaveBeenCalledTimes(3);
+        unmount();
+    });
+
+    it('暂停期间迟到的采样结果不会覆盖画面', async () => {
+        let 放行采样: ((值: 内存统计结果 | null) => void) | undefined;
+        采样.mockReturnValue(new Promise((解决) => void (放行采样 = 解决)));
+
+        const { lastFrame, stdin, unmount } = 挂载(<App />);
+        await 按键(stdin, 'p');
+
+        // 暂停之后才返回的响应必须被丢弃，否则「已暂停」就是假的
+        await 放行(放行采样, null);
+        await 推进(轮询间隔毫秒 * 3);
+
+        expect(lastFrame()).not.toContain('无法读取内存数据');
+        unmount();
+    });
+});
+
+describe('清理结果如实上报', () => {
+    it('成功时显示释放量与耗时', async () => {
+        const { lastFrame, stdin, unmount } = 挂载(<App />);
+        await 冲刷();
+
+        await 按键(stdin, 'c');
+        await 推进(600);
+
+        expect(清理).toHaveBeenCalledTimes(1);
+        expect(lastFrame()).toContain('已释放 1.00 GB · 耗时 143ms');
+        unmount();
     });
 
     /**
-     * visibilitychange 覆盖不到「别的应用抢走焦点但本窗口仍可见」这种情况，
-     * 所以必须同时监听 window 的 blur / focus。
+     * 旧 GUI 版本只处理 success 分支，purge 因权限失败时界面毫无反应，
+     * 用户无从区分「清理成功」和「根本没权限」。这条是本次重写最核心的行为。
      */
-    it('失焦后停止轮询，重新聚焦后继续', async () => {
-        await 渲染并就绪();
-        const 失焦前次数 = 获取内存数据.mock.calls.length;
+    it('失败时显示退出码、原始错误与权限提示', async () => {
+        清理.mockResolvedValue(清理失败);
+        const { lastFrame, stdin, unmount } = 挂载(<App />);
+        await 冲刷();
 
-        有焦点 = false;
-        await 派发窗口事件('blur');
-        await 推进(轮询间隔 * 5);
-        expect(获取内存数据).toHaveBeenCalledTimes(失焦前次数);
+        await 按键(stdin, 'c');
+        await 推进(600);
 
-        有焦点 = true;
-        await 派发窗口事件('focus');
-        expect(获取内存数据).toHaveBeenCalledTimes(失焦前次数 + 1);
+        const 帧 = lastFrame() ?? '';
+        expect(帧).toContain('清理未完成（退出码 1）');
+        expect(帧).toContain('root:wheel');
+        unmount();
     });
 
-    it('重复收到 focus 事件不会叠加出多个计时器', async () => {
-        await 渲染并就绪();
-        await 派发窗口事件('focus');
-        await 派发窗口事件('focus');
+    it('错误信息过长时截断，不把整屏挤乱', async () => {
+        清理.mockResolvedValue({ ...清理失败, 错误信息: 'x'.repeat(200) });
+        const { frames, stdin, unmount } = 挂载(<App />);
+        await 冲刷();
 
-        const 基准 = 获取内存数据.mock.calls.length;
-        await 推进(轮询间隔);
-        expect(获取内存数据).toHaveBeenCalledTimes(基准 + 1);
+        await 按键(stdin, 'c');
+        await 推进(600);
+
+        // wrap="truncate-end" 生效时不会折行，帧数保持稳定
+        expect((frames.at(-1) ?? '').split('\n').length).toBeLessThanOrEqual(20);
+        unmount();
     });
 
-    it('卸载后彻底停止轮询', async () => {
-        const { unmount } = await 渲染并就绪();
-        const 卸载前次数 = 获取内存数据.mock.calls.length;
+    it('退出码为 null 时不编造退出码', async () => {
+        清理.mockResolvedValue({ ...清理失败, 退出码: null });
+        const { lastFrame, stdin, unmount } = 挂载(<App />);
+        await 冲刷();
+
+        await 按键(stdin, 'c');
+        await 推进(600);
+
+        expect(lastFrame()).toContain('清理未完成：');
+        expect(lastFrame()).not.toContain('退出码');
+        unmount();
+    });
+
+    it('释放量为 0 时不谎报已释放 0.00 GB', async () => {
+        清理.mockResolvedValue({ ...清理成功, 释放字节: 0 });
+        const { lastFrame, stdin, unmount } = 挂载(<App />);
+        await 冲刷();
+
+        await 按键(stdin, 'c');
+        await 推进(600);
+
+        expect(lastFrame()).toContain('未测得可释放内存变化');
+        expect(lastFrame()).not.toContain('已释放');
+        unmount();
+    });
+
+    it('清理动效有下界也有上界，不再固定演满', async () => {
+        const { lastFrame, stdin, unmount } = 挂载(<App />);
+        await 冲刷();
+
+        await 按键(stdin, 'c');
+        await 推进(300);
+        expect(lastFrame()).toContain('清理中');
+
+        // purge 实测 21ms 就能返回，但界面至少演满 600ms
+        await 推进(300);
+        expect(lastFrame()).toContain('已释放 1.00 GB');
+        unmount();
+    });
+
+    it('清理进行中忽略重复按键，不会并发起多个 purge', async () => {
+        let 放行清理: ((值: 清理结果) => void) | undefined;
+        清理.mockReturnValue(new Promise((解决) => void (放行清理 = 解决)));
+
+        const { stdin, unmount } = 挂载(<App />);
+        await 冲刷();
+
+        await 按键(stdin, 'c');
+        await 按键(stdin, 'c');
+        await 按键(stdin, 'c');
+        await 推进(600);
+
+        expect(清理).toHaveBeenCalledTimes(1);
+        await 放行(放行清理, 清理成功);
+        await 推进(600);
+        unmount();
+    });
+
+    it('横幅停留足够久后自动消失，回到占位文案', async () => {
+        const { lastFrame, stdin, unmount } = 挂载(<App />);
+        await 冲刷();
+
+        await 按键(stdin, 'c');
+        await 推进(600);
+        expect(lastFrame()).toContain('已释放 1.00 GB');
+
+        await 推进(5000);
+        expect(lastFrame()).not.toContain('已释放 1.00 GB');
+        expect(lastFrame()).toContain('按 c 清理内存');
+        unmount();
+    });
+});
+
+describe('退出与卸载', () => {
+    it('按 q 卸载界面', async () => {
+        const { lastFrame, stdin } = 挂载(<App />);
+        await 冲刷();
+        expect(lastFrame()).toContain('RAM MASTER');
+
+        await 按键(stdin, 'q');
+        expect(lastFrame() ?? '').not.toContain('RAM MASTER');
+    });
+
+    it('卸载后清掉轮询定时器，不再继续采样', async () => {
+        const { unmount } = 挂载(<App />);
+        await 冲刷();
+        expect(采样).toHaveBeenCalledTimes(1);
 
         unmount();
-        await 推进(轮询间隔 * 5);
-
-        expect(获取内存数据).toHaveBeenCalledTimes(卸载前次数);
-    });
-});
-
-describe('渲染稳定性（旧实现每轮采样都会重挂载数值节点）', () => {
-    it('百分比变化时复用同一个 DOM 节点，而不是卸载重建', async () => {
-        await 渲染并就绪();
-        const 数值节点 = screen.getByText('60');
-
-        获取内存数据.mockResolvedValue({ ...采样结果, 已用百分比: 61.2 });
-        await 推进(轮询间隔);
-
-        // 旧实现写着 key={系统状态.percentage}，每轮采样都会让这个节点被整棵重建
-        expect(screen.getByText('61')).toBe(数值节点);
+        await 推进(轮询间隔毫秒 * 5);
+        expect(采样).toHaveBeenCalledTimes(1);
     });
 
-    it('数值未变时不触发多余的 DOM 更新', async () => {
-        await 渲染并就绪();
-        const 数值节点 = screen.getByText('60');
+    it('卸载后清掉横幅定时器', async () => {
+        const { stdin, unmount } = 挂载(<App />);
+        await 冲刷();
 
-        await 推进(轮询间隔);
-        await 推进(轮询间隔);
-
-        expect(screen.getByText('60')).toBe(数值节点);
-    });
-});
-
-describe('一键清理如实上报', () => {
-    it('点击后进入清理态并禁用按钮', async () => {
-        await 渲染并就绪();
-        let 已解决 = false;
-        执行大扫除.mockImplementation(
-            () =>
-                new Promise((解决) => {
-                    setTimeout(() => {
-                        已解决 = true;
-                        解决({ 成功: true, 耗时毫秒: 900, 释放字节: 0, 退出码: 0 });
-                    }, 900);
-                })
-        );
-
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(100);
-
-        expect(screen.getByText('PURGING SYSTEM...')).toBeInTheDocument();
-        expect(screen.getByRole('button')).toBeDisabled();
-        expect(已解决).toBe(false);
-    });
-
-    it('成功时展示真实释放量与耗时', async () => {
-        await 渲染并就绪();
-
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(最短清理动效 + 50);
-
-        expect(screen.getByText(/已释放 1\.00 GB/)).toBeInTheDocument();
-        expect(screen.getByText(/耗时 143ms/)).toBeInTheDocument();
-        expect(screen.getByRole('button')).not.toBeDisabled();
-    });
-
-    /**
-     * 这条覆盖的正是旧实现完全静默的路径：
-     * 旧代码只有 `if (结果.success)` 没有 else，purge 因权限不足失败时
-     * 用户看到的仍然是一段 2 秒的成功动画。
-     */
-    it('失败时展示错误横幅与退出码，而不是静默', async () => {
-        执行大扫除.mockResolvedValue({
-            成功: false,
-            耗时毫秒: 14,
-            退出码: 1,
-            错误信息: 'Unable to purge disk buffers: Operation not permitted'
-        });
-        await 渲染并就绪();
-
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(最短清理动效 + 50);
-
-        expect(screen.getByText(/清理未完成（退出码 1）/)).toBeInTheDocument();
-        expect(screen.getByText(/Operation not permitted/)).toBeInTheDocument();
-        expect(screen.queryByText(/已释放/)).not.toBeInTheDocument();
-    });
-
-    it('退出码拿不到时不显示括号，但依然报错', async () => {
-        执行大扫除.mockResolvedValue({
-            成功: false,
-            耗时毫秒: 8,
-            退出码: null,
-            错误信息: 'purge 被信号终止'
-        });
-        await 渲染并就绪();
-
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(最短清理动效 + 50);
-
-        expect(screen.getByText(/清理未完成：purge 被信号终止/)).toBeInTheDocument();
-        expect(screen.queryByText(/退出码/)).not.toBeInTheDocument();
-    });
-
-    it('成功但没测得内存变化时如实说明，不谎报释放量', async () => {
-        执行大扫除.mockResolvedValue({
-            成功: true,
-            耗时毫秒: 220,
-            释放字节: 0,
-            退出码: 0
-        });
-        await 渲染并就绪();
-
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(最短清理动效 + 50);
-
-        expect(screen.getByText(/未测得可释放内存变化/)).toBeInTheDocument();
-    });
-
-    it('失败最多等 600ms 就能看到，不再是固定演满 2 秒', async () => {
-        执行大扫除.mockResolvedValue({
-            成功: false,
-            耗时毫秒: 14,
-            退出码: 1,
-            错误信息: 'Operation not permitted'
-        });
-        await 渲染并就绪();
-
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(最短清理动效 + 50);
-        expect(screen.getByText(/清理未完成/)).toBeInTheDocument();
-    });
-
-    /**
-     * 这里断言定时器计数而不是「横幅从 DOM 消失」：
-     * Vitest 的假定时器默认不接管 requestAnimationFrame，而 AnimatePresence 的
-     * 退场动画正是靠 rAF 驱动的，所以状态清空后节点仍会挂在退场动画里不摘除。
-     * 计数断言直接对应本用例要验证的东西 —— 自动隐藏的 setTimeout 被 effect 正常调度并消费。
-     */
-    it('停留时间到点后自动隐藏的定时器会被消费掉', async () => {
-        await 渲染并就绪();
-        const 稳态计时器数 = vi.getTimerCount(); // 只剩轮询的 setInterval
-
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(最短清理动效 + 50);
-        expect(screen.getByText(/已释放/)).toBeInTheDocument();
-        expect(vi.getTimerCount()).toBe(稳态计时器数 + 1); // 多出一个自动隐藏 setTimeout
-
-        await 推进(横幅停留 + 100);
-        expect(vi.getTimerCount()).toBe(稳态计时器数); // 已触发，定时器归还
-    });
-
-    it('卸载时清掉轮询与自动隐藏定时器，不留悬挂计时器', async () => {
-        const { unmount } = await 渲染并就绪();
-        expect(vi.getTimerCount()).toBeGreaterThan(0);
-
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(最短清理动效 + 50);
-
-        // 旧实现的两个嵌套 setTimeout 从未被 clearTimeout，卸载后照样触发 setState
+        await 按键(stdin, 'c');
+        await 推进(600);
         unmount();
+
+        // 横幅的 5 秒定时器若泄漏，这里会抛「卸载后 setState」告警
+        await 推进(10_000);
         expect(vi.getTimerCount()).toBe(0);
     });
+});
 
-    it('再次清理会先清掉上一条横幅', async () => {
-        await 渲染并就绪();
+describe('非交互模式（stdout 不是终端）', () => {
+    /**
+     * 这条路径要等 Ink 的 waitUntilRenderFlush()，而它内部靠 setImmediate 让出宏任务。
+     * 假定时器会把 immediate 一起冻结，回调永远不落地，所以这里换回真实定时器。
+     */
+    beforeEach(() => {
+        vi.useRealTimers();
+    });
 
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(最短清理动效 + 50);
-        expect(screen.getByText(/已释放 1\.00 GB/)).toBeInTheDocument();
+    /**
+     * 真实定时器下只能靠反复让出宏任务来等 Ink 的冲刷落地。
+     *
+     * 每次让出必须是「独立的一个 act 作用域」：React 只在 act 退出时才冲刷更新，
+     * 把 20 次让出塞进同一个 act 里，App 的 采样 → 冲刷 → exit 会在 React
+     * 来得及重渲染之前一路跑完，最后一帧（采样失败的报错面板）就永远写不出来。
+     */
+    async function 冲刷到静止(): Promise<void> {
+        for (let 次 = 0; 次 < 20; 次++) {
+            await act(async () => {
+                await new Promise((解决) => setImmediate(解决));
+            });
+        }
+    }
 
-        执行大扫除.mockResolvedValue({
-            成功: false,
-            耗时毫秒: 9,
-            退出码: 1,
-            错误信息: 'Operation not permitted'
-        });
-        fireEvent.click(screen.getByRole('button'));
-        await 推进(最短清理动效 + 50);
+    it('只采一次样、回调成功、然后退出，不轮询', async () => {
+        const on采样结束 = vi.fn();
+        const { frames, unmount } = 挂载(<App 交互模式={false} on采样结束={on采样结束} />);
 
-        expect(screen.getByText(/清理未完成/)).toBeInTheDocument();
-        expect(screen.queryByText(/已释放/)).not.toBeInTheDocument();
+        await 冲刷到静止();
+
+        expect(采样).toHaveBeenCalledTimes(1);
+        expect(on采样结束).toHaveBeenCalledWith(true);
+        // 退出后 Ink 会清屏，所以要在所有帧里找，不能只看最后一帧
+        expect(frames.join('\n')).toContain('单次采样');
+        expect(frames.join('\n')).not.toContain('每 2 秒刷新');
+
+        await new Promise((解决) => setTimeout(解决, 50));
+        expect(采样).toHaveBeenCalledTimes(1);
+        unmount();
+    });
+
+    it('采样失败时如实报错，并以非零退出码收场', async () => {
+        采样.mockResolvedValue(null);
+        const on采样结束 = vi.fn();
+        const { frames, unmount } = 挂载(<App 交互模式={false} on采样结束={on采样结束} />);
+
+        await 冲刷到静止();
+
+        expect(on采样结束).toHaveBeenCalledWith(false);
+
+        /**
+         * 回归测试：交互模式要连续失败 3 次才改口报错，而非交互模式只采一次样、
+         * 没有「下一次」可等。沿用那个阈值的话，进程以退出码 1 结束，
+         * 画面上却永远停在「正在读取内存状态…」—— 正是本项目要消除的那种谎报。
+         */
+        const 末帧 = [...frames].reverse().find((帧) => 帧.includes('RAM MASTER')) ?? '';
+        expect(末帧).toContain('无法读取内存数据');
+        expect(末帧).not.toContain('正在读取内存状态');
+        unmount();
     });
 });

@@ -1,20 +1,15 @@
 import { defineConfig } from 'vitest/config';
-import react from '@vitejs/plugin-react';
 
 /**
- * 独立于 vite.config.ts。
- * 那份配置带着 root / base / publicDir / build 等纯构建关注点，
- * 混进来会让测试运行去解析 index.html 入口，且 root 被改到 src/renderer 后
- * tests/ 目录会落在 root 之外。
+ * 与 tsconfig 分开的独立配置：构建关心的是 src → dist 的 ESM 产物，
+ * 测试关心的是 node 环境下跑 tests/，两者的关注点不该混在一份文件里。
  */
 export default defineConfig({
-    plugins: [react()],
     test: {
-        environment: 'jsdom',
-        setupFiles: ['./vitest.setup.ts'],
-        globals: true,
+        // 不再有 DOM：Ink 把 React 渲染成终端字符，node 环境就够了，
+        // 也因此不需要 jsdom 和为 framer-motion 准备的 matchMedia 桩。
+        environment: 'node',
         include: ['tests/**/*.test.{ts,tsx}'],
-        // App.tsx 会 import './global.css'，测试里当作空模块处理
-        css: false
-    }
+        setupFiles: ['tests/setup.ts'],
+    },
 });

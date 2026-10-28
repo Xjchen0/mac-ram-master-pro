@@ -4,7 +4,7 @@ import {
     解析内存统计,
     计算释放字节,
     默认页大小
-} from '../src/main/memory-stats';
+} from '../src/memory-stats.js';
 import {
     样本_arm64_16384,
     样本_intel_4096,
@@ -13,7 +13,7 @@ import {
     样本_缺字段,
     样本_畸形,
     期望
-} from './fixtures/vm-stat-样本';
+} from './fixtures/vm-stat-样本.js';
 
 const 已用页 = 期望.联动页 + 期望.活跃页 + 期望.压缩页;
 

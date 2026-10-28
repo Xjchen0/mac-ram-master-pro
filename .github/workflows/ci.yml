@@ -8,16 +8,12 @@ on:
 permissions:
   contents: read
 
-# 全部测试都基于文本 fixture（tests/fixtures/vm-stat-样本.ts），
+# 全部测试都基于文本 fixture（tests/fixtures/vm-stat-样本.ts）和 ink-testing-library 的假 stdout，
 # 不执行 vm_stat / sysctl / purge 等任何 macOS 命令，所以 ubuntu runner 足够，
 # 无需为一次类型检查加测试排队等 macOS 机器。
 jobs:
   verify:
     runs-on: ubuntu-latest
-
-    env:
-      # 测试不启动 Electron，跳过约 100MB 的二进制下载
-      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
 
     steps:
       - name: Checkout Code
@@ -26,7 +22,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          # Ink 8 与 Vitest 5 都要求 Node >= 22（Vitest 5 实际下限是 22.12）
+          node-version: 22
           cache: 'npm'
 
       - name: Install Dependencies
@@ -37,3 +34,14 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify Build Artifacts
+        run: |
+          test -f dist/cli.js
+          test -f dist/App.js
+          test -f dist/memory-stats.js
+          # bin 入口必须保留 shebang，否则 npm 链接出来的 ram-master 无法直接执行
+          head -1 dist/cli.js | grep -q '^#!/usr/bin/env node$'
